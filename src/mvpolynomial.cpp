@@ -179,36 +179,26 @@ mvpolyT::gram() {
       }
     }
 
-/*
- * Generating linear constraints
- */
-  std::map<exps, coeff>::const_iterator it;
-  for (it = terms.begin(); it != terms.end(); it++) {
-    constraintT ctr;
-    ctr.rhs = it->second;
+    // Generating linear constraints (new)
+    // Check all possible monimials in momnomilindex and compair with the polynomial
+    for (auto const& pair : monomialindex) {
+        constraintT ctr;
+        auto term_it = terms.find(pair.first);
+    ctr.rhs = (term_it != terms.end()) ? term_it->second : coeff(0);
 
-    /*
-     * The find method returns an iterator with the itens or monomialindex.end() if does not find anything.
-     */
-    std::map<exps, std::vector<std::pair<unsigned int, coeff>>>::const_iterator findit;
-    findit = monomialindex.find(it->first); 
-
-    if (findit != monomialindex.end()) {
-    /*
-	* Vector with decision variables indexes and their coefficients 1.0 or 2.0
-	*/
-	const std::vector<std::pair<unsigned int, coeff>> indexandcoeffs = findit->second;
-	
-	for(size_t v = 0; v  < indexandcoeffs.size(); v++) {
-	  unsigned int index = indexandcoeffs[v].first;
-	  coeff c = indexandcoeffs[v].second;
-
-	  ctr.lhs[index]=c;
-	}
+    const std::vector<std::pair<unsigned int, coeff>>& indexandcoeffs = pair.second;
+    
+    for(size_t v = 0; v < indexandcoeffs.size(); v++) {
+        unsigned int index = indexandcoeffs[v].first;
+        coeff c = indexandcoeffs[v].second;
+        ctr.lhs[index] = c;
     }
+    
     ans.push_back(ctr);
-  }
-  return(ans);
+
+    }
+    
+    return(ans);
 }
 
 /*
@@ -453,7 +443,10 @@ mvpolyT::projection() {
         }
         coeff error = current_val - target_val;
         
-        std::cout<<error<<'\n'; /*dbg*/
+        /*
+         *  dbg
+         */
+        std::cout<<error<<'\n';
 
         /*
          * Apply correction
