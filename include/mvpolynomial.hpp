@@ -2,7 +2,6 @@
 #define MVPOLYNOMIAL_HPP
 
 #include <cstddef>
-#include <string>
 #include <vector>
 #include <map>
 #include <gmpxx.h>
@@ -71,16 +70,18 @@ class mvpolyT {
   const monomialbasisT& monomialbasis();
   std::vector<constraintT> gram();
 
+/*
+ * In this branch, this method uses the SCIP-SDP API
+ * and the SCIPpp wrapper.
+ */
+  void solvesdp();
+
+
   /*
-   * While using scip-sdp these three functions
-   * are compatible with scip-sdp formats.
+   * Call the private exatification methods
    */
-  void todats(const std::string& filename);
-  void scipsdp(const std::string& filename) const;
-  void readsolution(const std::string& filename);
-
   void exactify();  
-
+  
   /*
    * matrix decomposition
    */

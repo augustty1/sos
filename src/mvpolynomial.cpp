@@ -1,10 +1,17 @@
 #include <algorithm>
-#include <sstream>
-#include <fstream>
+#include <optional>
+#include <string>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
 #include "../include/mvpolynomial.hpp"
+
+/*
+ * SCIPpp and SCIP-SDP dependencies
+ */
+#include <scippp/model.hpp>                 /* scippp::Model, Var, LinExpr, Solution */
+#include <scip/cons_sdp.h>                  /* SCIP-SDP: SCIPcreateConsSdp          */
+#include <scip/scipsdpdefplugins.h>         /* SCIP-SDP: SCIPSDPincludeDefaultPlugins */
 
 mvpolyT::mvpolyT () {
   std::cin>>nvars;
@@ -202,129 +209,94 @@ mvpolyT::gram() {
 }
 
 /*
- * .dat-s is the general format for sparse mixed semidefinite programming
- * [more info](https://github.com/scipopt/SCIP-SDP/blob/main/sdpa_format.txt)
+ * Builds and solves the Gram-matrix feasibility SDP in memory:
  */
-void 
-mvpolyT::todats(const std::string& filename) {
+void
+mvpolyT::solvesdp() {
   const monomialbasisT& mb = monomialbasis();
-  std::vector<constraintT>ctrs = gram();
-  
-  unsigned int numvars = (mb.size*(mb.size + 1)) / 2;
-  /*
-   * To gen == contraint, we need the >= and the <=
-   */
-  unsigned int numlps = 2*ctrs.size();
+  const std::vector<constraintT> ctrs = gram();
+  const size_t N  = mb.size;
+  const size_t ny = N * (N + 1) / 2;            /* distinct Gram entries */
 
-  std::ofstream file(filename);
-  if (!file.is_open())
-    throw std::runtime_error("Couldn't open: "+ filename);
+  SCIP* scip = nullptr;
+  if (SCIPcreate(&scip) != SCIP_OKAY)
+    throw std::runtime_error("SCIPcreate failed");
+  if (SCIPSDPincludeDefaultPlugins(scip) != SCIP_OKAY)
+    throw std::runtime_error("SCIPSDPincludeDefaultPlugins failed");
 
-  file<<numvars<<'\n';
-  file<<"2\n"; /*number of blocks sdp and lp constraints*/
-  file<<mb.size<<" -"<<numlps<<'\n'; /*size of the blocks - is for lp constraints*/
-  for(unsigned int i=0; i<numvars;i++) /*fesiability*/
-    file<<(i<numvars-1?"0 ":"0");
-  file<<'\n';
+  bool optimal = false;
 
-  /*
-   * sdp block
-   * the sdp matrix is 1 based
-   */
-  unsigned int y_k = 1;
-  for (unsigned int i = 0; i<mb.size; i++) {
-    for(unsigned int j=i; j<mb.size; j++) {
-      file<<y_k<<" 1 "<<(i+1)<<" "<<(j+1)<<" 1.0\n";
-      y_k++;
+  { /* scope: the Model must be destroyed before SCIPfree(&scip) */
+    scippp::Model model("gram", scip, /*includeDefaultPlugins=*/false);
+
+    /*Vector of variables, it is diferent of the vector from SCIPpp which needs a know size*/
+    std::vector<scippp::Var> y;
+    y.reserve(ny);
+    for (size_t k = 0; k < ny; k++)
+      y.push_back(model.addVar("y" + std::to_string(k), 0.0, scippp::VarType::CONTINUOUS,
+                               std::nullopt, std::nullopt));
+
+    for (size_t c = 0; c < ctrs.size(); c++) {
+      scippp::LinExpr e;
+      for (const auto& [idx1, a] : ctrs[c].lhs)
+        e += a.get_d() * y[idx1 - 1];
+      model.addConstr(e == ctrs[c].rhs.get_d(), "gram_" + std::to_string(c));
     }
-  }
 
-  /*
-   * lp constraints block
-   * the lp rows is 1 based
-   */
-  unsigned int row=1;
-  for(size_t ctr=0; ctr< ctrs.size(); ctr++) {
-   file <<"0 2 "<<row<<" "<<row<<" "<<ctrs[ctr].rhs<<'\n';/*constant term*/
+    /*
+     * SCIP-SDP integration, sdp constraints generation
+     */
+    std::vector<int> rows(ny), cols(ny), nvarnonz(ny, 1);   /* 1 nonzero per variable */
+    std::vector<double> vals(ny, 1.0);
+    std::vector<int*> rowp(ny), colp(ny);
+    std::vector<double*> valp(ny);
+    std::vector<SCIP_VAR*> scipvars(ny);
 
-   std::map<unsigned int, coeff>::iterator it;
-   for(it = ctrs[ctr].lhs.begin() ; it != ctrs[ctr].lhs.end(); it++) {
-     file<<it->first<<" 2 "<<row<<" "<<row<<" "<<it->second<<'\n'; 
-   }
-   row++;
-
-   /*sign inversion*/
-    file<<"0 2 "<<row<<" "<<row<<" "<<-(ctrs[ctr].rhs)<<'\n';
-    for(it = ctrs[ctr].lhs.begin(); it != ctrs[ctr].lhs.end(); it++) {
-      file<<it->first<<" 2 "<<row<<" "<<row<<" "<< -(it->second)<<'\n';
-    }
-    row++;
-  }
-  file.close();
-}
-
-void 
-mvpolyT::scipsdp(const std::string& filename) const {
-  std::string command = "scipsdp <" + filename;
-  int res = std::system(command.c_str());
-  if(res !=0)
-    std::cerr<<"\n Error in scipsdp"<<res<<'\n';
-}
-
-/*
- * After SCIP Solver we need to read data and transform again into a polynomial
- */
-void 
-mvpolyT::readsolution(const std::string& filename) {
-  if(!ismbcomputed)
-    throw std::runtime_error("It is necessary to compute monomial basis first");
-
-  std::ifstream file(filename);
-  std::string line;
-  bool foundopt = false;
-  unsigned int expect = (mb.size *(mb.size + 1))/2;
-  solution.y.assign(expect,0.0);
-
-  while(std::getline(file,line)) {
-    if(line.find("optimal solution found") != std::string::npos)
-      foundopt = true;
-
-    if(line.find("x_") != std::string::npos && line.find("(obj:") != std::string::npos) {
-      std::stringstream ss(line);
-      std::string x;
-      /*
-       * SCIP -> double -> mpq_class -> LDLT()
-       */
-      //double temp_c;
-      //ss>>x>>temp_c;
-
-      //coeff c(temp_c);
-      //c.canonicalize();
-      double c;
-      ss >> x >> c;
-
-      size_t pos = x.find("_");
-      if (pos!=std::string::npos) {
-	        unsigned int i = std::atoi(x.c_str() + pos + 1);
-	 if(i < expect)
-	    solution.y[i] = c;
+    size_t k = 0;
+    for (size_t i = 0; i < N; i++) {
+      for (size_t j = i; j < N; j++) {
+        rows[k] = static_cast<int>(j);
+        cols[k] = static_cast<int>(i);
+        rowp[k] = &rows[k];
+        colp[k] = &cols[k];
+        valp[k] = &vals[k];
+        scipvars[k] = y[k].getVar();
+        k++;
       }
     }
-  }
 
-  file.close();
+    SCIP_CONS* sdpcons = nullptr;
+    if (SCIPcreateConsSdp(scip, &sdpcons, "gram_psd",
+                          static_cast<int>(ny), static_cast<int>(ny), static_cast<int>(N),
+                          nvarnonz.data(), colp.data(), rowp.data(), valp.data(),
+                          scipvars.data(),
+                          0, nullptr, nullptr, nullptr,
+                          FALSE) != SCIP_OKAY)
+      throw std::runtime_error("SCIPcreateConsSdp failed");
+    if (SCIPaddCons(scip, sdpcons) != SCIP_OKAY)
+      throw std::runtime_error("SCIPaddCons failed");
+    SCIPreleaseCons(scip, &sdpcons);
 
-  // another debug
-  if(!foundopt)
-    throw std::runtime_error("Optimal solution was not found");
+    model.solve();
+    optimal = (model.getStatus() == SCIP_STATUS_OPTIMAL && model.getNSols() > 0);
 
-  solution.nvars = solution.y.size();
-  solution.size = mb.size;
+    if (optimal) {
+      scippp::Solution sol = model.getBestSol();
+      solution.y.assign(ny, 0.0);
+      for (size_t kk = 0; kk < ny; kk++)
+        solution.y[kk] = y[kk].getSolVal(sol);
+    }
+  } /* Model destroyed here */
+
+  SCIPfree(&scip);
+
+  if (!optimal)
+    throw std::runtime_error("SCIP-SDP found no optimal solution");
+
+  solution.y_exact.clear();
+  solution.nvars  = static_cast<unsigned int>(ny);
+  solution.size   = N;
   solution.solved = true;
-/*
-  for(int i = 0; i<solution.y.size(); i++)
-    std::cout<<solution.y[i]<<'\n';
-*/
 }
 
 /*
@@ -462,6 +434,7 @@ mvpolyT::projection() {
     }
 }
 
+// TODO refinement iterations method
 void
 mvpolyT::exactify() {
    if(!solution.solved) {

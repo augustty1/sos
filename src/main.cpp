@@ -17,23 +17,13 @@ int main () {
   F.dbg();
 
   std::cout << '\n';
-  /*
-   * pre-processing and
-   * constraint generation
-   */
-  F.todats("mvpoly.dat-s");
 
   /*
-   * communicates with 
-   * scip via interactive shell
+   * Solve using the SCIP-SDP API
+   * and the SCIPpp wrapper.
    */
-  F.scipsdp("solvescript.sh");
+  F.solvesdp();
 
-  /*
-   * post-processing and
-   * sos gram matrix reconstruction
-   */
-  F.readsolution("solution.sol");
 
   // TODO projection in affine subspace
   F.exactify();
