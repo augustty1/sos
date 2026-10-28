@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <optional>
 #include <string>
 #include <cmath>
 #include <iostream>
@@ -13,11 +12,89 @@
 #include <scip/cons_sdp.h>                  /* SCIP-SDP: SCIPcreateConsSdp          */
 #include <scip/scipsdpdefplugins.h>         /* SCIP-SDP: SCIPSDPincludeDefaultPlugins */
 
+/*
+ * Last convergent h/k of the continued fraction of x with k <= maxden.
+ * Exact integer arithmetic (Euclid on num/den): no floating point error
+ * and no overflow, for any size of x.
+ *   h_n = a_n h_{n-1} + h_{n-2},   k_n = a_n k_{n-1} + k_{n-2}
+ */
+static mpq_class 
+cf_approx(const mpq_class& x, const mpz_class& maxden) {
+  mpz_class n = x.get_num(), d = x.get_den();
+  bool neg = (n < 0);
+  if (neg) n = -n;
+
+  mpz_class hm2 = 0, hm1 = 1;   /* h_{-2}, h_{-1} */
+  mpz_class km2 = 1, km1 = 0;   /* k_{-2}, k_{-1} */
+  mpz_class a, h, k, r;
+
+  while (d != 0) {
+    a = n / d;                  /* floor, since n >= 0 and d > 0 */
+    h = a * hm1 + hm2;
+    k = a * km1 + km2;
+    if (k > maxden) break;
+    hm2 = hm1; hm1 = h;
+    km2 = km1; km1 = k;
+    r = n - a * d;
+    n = d;
+    d = r;
+  }
+  mpq_class res(hm1, km1);
+  res.canonicalize();
+  return neg ? mpq_class(-res) : res;
+}
+
+/* restores the default mpf precision when leaving refine() */
+struct MpfPrecGuard {
+  mp_bitcnt_t old;
+  explicit MpfPrecGuard(mp_bitcnt_t bits) : old(mpf_get_default_prec()) { mpf_set_default_prec(bits); }
+  ~MpfPrecGuard() { mpf_set_default_prec(old); }
+};
+
+/* "0.123e-45" style formatting for mpf (safe below the double range) */
+static std::string 
+sci(const mpf_class& x) {
+  if (x == 0) return std::string("0");
+  mp_exp_t e;
+  std::string s = x.get_str(e, 10, 3);
+  return "0." + s + "e" + std::to_string(static_cast<long>(e));
+}
+
+/* Gauss elimination with partial pivoting; solves G x = b (result in b) */
+static bool 
+solve_linear(std::vector<std::vector<mpf_class>>& G, std::vector<mpf_class>& b,
+                  const mpf_class& ptol) {
+  const size_t m = b.size();
+  for (size_t c = 0; c < m; c++) {
+    size_t piv = c;
+    mpf_class best = abs(G[c][c]);
+    for (size_t r = c + 1; r < m; r++) {
+      mpf_class v = abs(G[r][c]);
+      if (v > best) { best = v; piv = r; }
+    }
+    if (best < ptol) return false;
+    if (piv != c) { std::swap(G[piv], G[c]); std::swap(b[piv], b[c]); }
+    for (size_t r = c + 1; r < m; r++) {
+      if (G[r][c] == 0) continue;
+      mpf_class f = G[r][c] / G[c][c];
+      for (size_t k = c; k < m; k++) G[r][k] -= f * G[c][k];
+      b[r] -= f * b[c];
+    }
+  }
+  for (size_t c = m; c-- > 0; ) {
+    mpf_class s = b[c];
+    for (size_t k = c + 1; k < m; k++) s -= G[c][k] * b[k];
+    b[c] = s / G[c][c];
+  }
+  return true;
+}
+
 mvpolyT::mvpolyT () {
   std::cin>>nvars;
   double temp_c;
   exps e(nvars);
   ismbcomputed = false;
+  verbose = true;
   
   while(std::cin>>temp_c) {
     coeff c(temp_c);
@@ -145,8 +222,6 @@ mvpolyT::monomialbasis() {
 /*
  * Given a monomial basis, does not matter the ordering this function
  * uses the gram's matrix method for computing a vector of linear
- * constraints. This constraints will be translated to the .dat-s format
- * for a Semidefinite programming solver.
  */
 std::vector<constraintT> 
 mvpolyT::gram() {
@@ -176,36 +251,29 @@ mvpolyT::gram() {
     for(unsigned int j = i; j<mb.size; j++) {
       exps product(nvars);
       for (unsigned int k = 0; k < nvars; k++) {
-	    product[k] = mb.monomials[i][k] + mb.monomials[j][k];
+        product[k] = mb.monomials[i][k] + mb.monomials[j][k];
       }
 
-	unsigned int y_k = entryindex[{i,j}];
-	coeff c = (i==j)? 1.0 : 2.0;
+      unsigned int y_k = entryindex[{i,j}];
+      coeff c = (i==j)? 1 : 2;
 
-	monomialindex[product].push_back({y_k, c});
-      }
+      monomialindex[product].push_back({y_k, c});
     }
+  }
 
-    // Generating linear constraints (new)
-    // Check all possible monimials in momnomilindex and compair with the polynomial
-    for (auto const& pair : monomialindex) {
-        constraintT ctr;
-        auto term_it = terms.find(pair.first);
+  // Generating linear constraints
+  for (auto const& pair : monomialindex) {
+    constraintT ctr;
+    auto term_it = terms.find(pair.first);
     ctr.rhs = (term_it != terms.end()) ? term_it->second : coeff(0);
 
-    const std::vector<std::pair<unsigned int, coeff>>& indexandcoeffs = pair.second;
-    
-    for(size_t v = 0; v < indexandcoeffs.size(); v++) {
-        unsigned int index = indexandcoeffs[v].first;
-        coeff c = indexandcoeffs[v].second;
-        ctr.lhs[index] = c;
-    }
-    
-    ans.push_back(ctr);
+    for(const auto& ic : pair.second)
+      ctr.lhs[ic.first] = ic.second;
 
-    }
-    
-    return(ans);
+    ans.push_back(ctr);
+  }
+
+  return(ans);
 }
 
 /*
@@ -294,155 +362,370 @@ mvpolyT::solvesdp() {
     throw std::runtime_error("SCIP-SDP found no optimal solution");
 
   solution.y_exact.clear();
+  solution.y_refined.clear();
+  solution.refined = false;
   solution.nvars  = static_cast<unsigned int>(ny);
   solution.size   = N;
   solution.solved = true;
 }
 
 /*
-* Approximate a double with finite 
-* continued fraction i.e. a better rational
-* approximation: a/b with b > 0 there is no 
-* rational number with smaller denominator 
-* which is closer to the "real" number
-*/
+ * Rationalization with continued fractions: every y_k (the refined
+ * mpf value if available, else the double from the solver) is replaced
+ * by its last convergent with denominator <= maxden. 
+ */
 void
-mvpolyT::continued_fractions(long maxden) {
-    solution.y_exact.resize(solution.y.size());
+mvpolyT::continued_fractions(const mpz_class& maxden) {
+  const size_t n = solution.y.size();
+  const bool useref = solution.refined && solution.y_refined.size() == n;
+  solution.y_exact.assign(n, coeff(0));
 
-    for (size_t k = 0; k < solution.y.size(); k++) {
-        double x = solution.y[k];
-        long sign = (x < 0) ? -1 : 1;
-        x = std::abs(x);
-
-        long long h0 = 0, h1 = 1;
-        long long g0 = 1, g1 = 0;
-        double y = x;
-        long long a = static_cast<long long>(std::floor(y));
-
-        long long h = a*h1 + h0;
-        long long g = a*g1 + g0;
-
-        while (g <= maxden && y!= static_cast<double>(a)) {
-            double diff = y - static_cast<double>(a);
-            if (diff == 0.0) break;
-            y = 1.0 / diff;
-            h0 = h1;
-            h1 = h;
-            g0 = g1;
-            g1 = g;
-            a = static_cast<long long>(std::floor(y));
-            h = a*h1 + h0;
-            g = a*g1 + g0;
-        }
-        if ( g > maxden ) {
-            h = h1;
-            g = g1;
-        }
-
-        mpq_class rational(static_cast<long>(sign*h), static_cast<unsigned long>(g));
-        rational.canonicalize();
-        solution.y_exact[k] = rational;
-
-    }
-    /*
-     * Evaluate tau is compute the euclidian distance: 
-     * tau^2 = sum_(i,j)(Q_i,j - ~Q_i,j)^2
-     */
+  for (size_t k = 0; k < n; k++) {
+    mpq_class x;
+    if (useref)
+      mpq_set_f(x.get_mpq_t(), solution.y_refined[k].get_mpf_t()); /* exact */
+    else
+      x = mpq_class(solution.y[k]);                                /* exact */
+    x.canonicalize();
+    solution.y_exact[k] = cf_approx(x, maxden);
+  }
 }
 
 /*
- * Projection into the affine subspace of 
- * valid gram matrices.
+ * Projection into the affine subspace of valid gram matrices
+ * (Peyrl-Parrilo, Prop. 7). Entries of the same monomial gamma form disjoint
+ * groups, and each y_k in a group is shifted by e_gamma / n(gamma)
+ * where n(gamma) = sum of the multiplicities (1 diagonal / 2 off-diagonal).
  */
-// TODO modulo check solution
 // TODO data structure for monomial hash table
 void
 mvpolyT::projection() {
- if(solution.y_exact.empty()) {
-       throw std::runtime_error("It is necessary to solve first");
-   }
-   
-    std::cout<<"Projection\n------------\n\n"; /*dbg*/
+  if(solution.y_exact.empty())
+    throw std::runtime_error("It is necessary to solve first");
 
-    /*
-     * expoents |-> y index and coefficient
-     */
-    std::map<exps, std::vector<std::pair<unsigned int, coeff>>> monomialindex;
-    unsigned int k = 0;
-    for (unsigned int i = 0; i < mb.size; i++) {
-        for (unsigned int j = i; j < mb.size; j++) {
-            exps product(nvars);
-            for (unsigned int v = 0; v < nvars; v++) {
-                product[v] = mb.monomials[i][v] + mb.monomials[j][v];
-            }
-            coeff c = (i == j) ? 1 : 2;
-            monomialindex[product].push_back({k, c});
-            k++;
-        }
+  const monomialbasisT& mb = monomialbasis();
+
+  /*
+   * expoents |-> y index and coefficient
+   */
+  std::map<exps, std::vector<std::pair<unsigned int, coeff>>> monomialindex;
+  unsigned int k = 0;
+  for (unsigned int i = 0; i < mb.size; i++) {
+    for (unsigned int j = i; j < mb.size; j++) {
+      exps product(nvars);
+      for (unsigned int v = 0; v < nvars; v++)
+        product[v] = mb.monomials[i][v] + mb.monomials[j][v];
+      coeff c = (i == j) ? 1 : 2;
+      monomialindex[product].push_back({k, c});
+      k++;
+    }
+  }
+
+  coeff maxerr = 0;
+  for (const auto& item : monomialindex) {
+    const exps& gamma = item.first;
+    const auto& entries = item.second;
+
+    coeff n_gamma = 0;
+    coeff current_val = 0;
+    for (const auto& entry : entries) {
+      n_gamma += entry.second;
+      current_val += entry.second * solution.y_exact[entry.first];
     }
 
-    for (const auto& item : monomialindex) {
-        /*
-         * gamma = alpha + beta (tuples of expoents) 
-         * entries that contribute to the monomial
-         * in final polynomial
-         */
-        const exps& gamma = item.first;
-        const auto& entries = item.second;
+    coeff target_val = 0;
+    auto target_it = terms.find(gamma);
+    if (target_it != terms.end())
+      target_val = target_it->second;
 
-        /*
-         * projection divisor
-         */
-        coeff n_gamma = 0;
-        coeff current_val = 0;
+    coeff error = current_val - target_val;
+    if (abs(error) > maxerr) maxerr = abs(error);
 
-        for (const auto& entry : entries) {
-            unsigned int k = entry.first;
-            coeff mult = entry.second;
-
-            n_gamma += mult; 
-            current_val += mult * solution.y_exact[k]; 
-        }
-
-        /*
-         * At original polynomial
-         */
-        coeff target_val = 0;
-        auto target_it = terms.find(gamma);
-        if (target_it != terms.end()) {
-            target_val = target_it->second;
-        }
-        coeff error = current_val - target_val;
-        
-        /*
-         *  dbg
-         */
-        std::cout<<error<<'\n';
-
-        /*
-         * Apply correction
-         */
-        if (error != 0) {
-            coeff correction = error / n_gamma;
-            for (const auto& entry : entries) {
-                unsigned int k = entry.first;
-                solution.y_exact[k] -= correction;
-                solution.y_exact[k].canonicalize(); 
-            }
-        }
+    if (error != 0) {
+      coeff correction = error / n_gamma;
+      for (const auto& entry : entries) {
+        solution.y_exact[entry.first] -= correction;
+        solution.y_exact[entry.first].canonicalize();
+      }
     }
+  }
+  if (verbose)
+    std::cout << "[projection] max coefficient error before projection = "
+              << maxerr.get_d() << '\n';
 }
 
-// TODO refinement iterations method
+/*
+ * Gauss-Newton refinement.
+ *
+ * Write the numerical Gram matrix as Q = A^T A (Cholesky), i.e. f ~ sum_i p_i^2
+ * with p_i = sum_j A[i][j] z_j. Look for dA with
+ *        f - sum_i (p_i + dp_i)^2 = 0   linearized:   2 sum_i p_i dp_i = r,
+ *        r = f - sum_i p_i^2.
+ * It is an underdetermined linear system J dA = r (J has m rows = #monomials
+ * of degree <= 2d); the minimum norm solution is dA = J^T (J J^T)^{-1} r.
+ * The new residual is -sum dp_i^2 = O(|dA|^2): quadratic convergence.
+ *
+ * W = A^T A is positive semidefinite by construction and f - z^T W z -> 0,
+ * so the refined matrix is (almost) exactly in the affine subspace while
+ * staying inside the PSD cone. That is what makes the later projection safe
+ * (delta -> 0 in Peyrl-Parrilo's Prop. 8).
+ *
+ * Assumes Q is positive definite (strict feasibility), i.e. rank N.
+ * The refined matrix is stored in solution.y_refined only if it is better
+ * than the solver's one (solution.refined tells whether it was stored).
+ */
 void
-mvpolyT::exactify() {
-   if(!solution.solved) {
-       throw std::runtime_error("It is necessary to solve first");
-   }
+mvpolyT::refine(unsigned int prec_bits, unsigned int tol_digits, unsigned int maxiter) {
+  if(!solution.solved)
+    throw std::runtime_error("It is necessary to solve first");
 
-   continued_fractions(1e6);
-   projection();
+  const monomialbasisT& B = monomialbasis();
+  const size_t N = B.size;
+  const size_t ny = N * (N + 1) / 2;
+  MpfPrecGuard guard(prec_bits);
+
+  /* index of every monomial gamma = m_j + m_l */
+  std::map<exps, size_t> gidx;
+  std::vector<std::vector<size_t>> pg(N, std::vector<size_t>(N));
+  for (size_t j = 0; j < N; j++) {
+    for (size_t l = 0; l < N; l++) {
+      exps g(nvars);
+      for (unsigned int v = 0; v < nvars; v++)
+        g[v] = B.monomials[j][v] + B.monomials[l][v];
+      size_t id = gidx.size();
+      pg[j][l] = gidx.emplace(g, id).first->second;
+    }
+  }
+  const size_t m = gidx.size();
+
+  std::vector<mpf_class> target(m);
+  for (const auto& t : terms) {
+    auto it = gidx.find(t.first);
+    if (it == gidx.end())
+      continue;
+    mpf_set_q(target[it->second].get_mpf_t(), t.second.get_mpq_t());
+  }
+
+  /* numerical Gram matrix */
+  std::vector<std::vector<mpf_class>> Q(N, std::vector<mpf_class>(N));
+  {
+    size_t k = 0;
+    for (size_t i = 0; i < N; i++)
+      for (size_t j = i; j < N; j++, k++)
+        Q[i][j] = Q[j][i] = solution.y[k];
+  }
+
+  /* Q + eta*I = A^T A, A upper triangular (Cholesky). eta > 0 only if the solver's Q
+     is numerically indefinite; Gauss-Newton absorbs that perturbation. */
+  std::vector<std::vector<mpf_class>> A(N, std::vector<mpf_class>(N));
+  mpf_class eta = 0;
+  for (int attempt = 0; ; attempt++) {
+    bool ok = true;
+    for (size_t i = 0; i < N; i++) for (size_t j = 0; j < N; j++) A[i][j] = 0;
+    for (size_t i = 0; i < N && ok; i++) {
+      mpf_class s = Q[i][i] + eta;
+      for (size_t kk = 0; kk < i; kk++) s -= A[kk][i] * A[kk][i];
+      if (s <= 1e-13 * abs(Q[i][i])) { ok = false; break; }
+      A[i][i] = sqrt(s);
+      for (size_t j = i + 1; j < N; j++) {
+        mpf_class t = Q[i][j];
+        for (size_t kk = 0; kk < i; kk++) t -= A[kk][i] * A[kk][j];
+        A[i][j] = t / A[i][i];
+      }
+    }
+    if (ok) break;
+    if (attempt >= 40)
+      throw std::runtime_error("refine: Gram matrix is not positive definite (not strictly feasible?)");
+    eta = (eta == 0) ? mpf_class(1e-12) : eta * 10;
+  }
+  if (verbose && eta != 0)
+    std::cout << "[refine] diagonal shift eta = " << sci(eta) << " was needed\n";
+
+  const mpf_class tol(std::string("1e-") + std::to_string(tol_digits));
+  const mpf_class ptol(std::string("1e-") + std::to_string(prec_bits * 3 / 10 - 10));
+
+  std::vector<std::vector<mpf_class>> Qa(N, std::vector<mpf_class>(N));
+  std::vector<mpf_class> res(m);
+  mpf_class theta0 = 0, theta = 0;
+  bool converged = false;
+
+  for (unsigned int it = 0; ; it++) {
+
+    /* Qa = A^T A and residual r = f - sum_gamma (...) */
+    for (size_t j = 0; j < N; j++) {
+      for (size_t l = j; l < N; l++) {
+        mpf_class s = 0;
+        for (size_t i = 0; i < N; i++) s += A[i][j] * A[i][l];
+        Qa[j][l] = Qa[l][j] = s;
+      }
+    }
+    std::vector<mpf_class> c(m);
+    for (size_t j = 0; j < N; j++)
+      for (size_t l = 0; l < N; l++)
+        c[pg[j][l]] += Qa[j][l];
+
+    theta = 0;
+    for (size_t g = 0; g < m; g++) {
+      res[g] = target[g] - c[g];
+      mpf_class v = abs(res[g]);
+      if (v > theta) theta = v;
+    }
+    if (it == 0) theta0 = theta;
+    if (verbose)
+      std::cout << "[refine] iter " << it << "  backward error theta = " << sci(theta) << '\n';
+
+    if (theta < tol) { converged = true; break; }
+    if (it >= maxiter) break;
+
+    /*
+     * J J^T:  J[gamma][(i,j)] = 2 A[i][l] with m_j + m_l = gamma
+     * (for fixed j, distinct l give distinct gamma)
+     */
+    std::vector<std::vector<mpf_class>> G(m, std::vector<mpf_class>(m));
+    for (size_t i = 0; i < N; i++)
+      for (size_t j = 0; j < N; j++)
+        for (size_t l1 = 0; l1 < N; l1++) {
+          mpf_class a1 = 2 * A[i][l1];
+          for (size_t l2 = 0; l2 < N; l2++)
+            G[pg[j][l1]][pg[j][l2]] += a1 * (2 * A[i][l2]);
+        }
+
+    std::vector<mpf_class> lambda = res;
+    if (!solve_linear(G, lambda, ptol)) {
+      if (verbose) std::cout << "[refine] J J^T singular, stopping\n";
+      break;
+    }
+
+    /* dA = J^T lambda */
+    for (size_t i = 0; i < N; i++)
+      for (size_t j = 0; j < N; j++) {
+        mpf_class s = 0;
+        for (size_t l = 0; l < N; l++) s += A[i][l] * lambda[pg[j][l]];
+        A[i][j] += 2 * s;
+      }
+  }
+
+  if (!converged && verbose)
+    std::cout << "[refine] warning: tolerance not reached\n";
+
+  /* only keep the refined matrix if it is really better than the solver's one */
+  if (theta < theta0 || converged) {
+    solution.y_refined.assign(ny, mpf_class(0));
+    size_t k = 0;
+    for (size_t i = 0; i < N; i++)
+      for (size_t j = i; j < N; j++, k++)
+        solution.y_refined[k] = Qa[i][j];
+    solution.refined = true;
+  }
+}
+
+/*
+ * Exact identity  f == z^T Q z  with Q = y_exact (checks every coefficient).
+ */
+bool
+mvpolyT::verify_identity() const {
+  std::map<exps, coeff> acc;
+  size_t k = 0;
+  for (unsigned int i = 0; i < mb.size; i++) {
+    for (unsigned int j = i; j < mb.size; j++, k++) {
+      exps p(nvars);
+      for (unsigned int v = 0; v < nvars; v++)
+        p[v] = mb.monomials[i][v] + mb.monomials[j][v];
+      acc[p] += ((i == j) ? 1 : 2) * solution.y_exact[k];
+    }
+  }
+  for (const auto& a : acc) {
+    auto it = terms.find(a.first);
+    coeff t = (it == terms.end()) ? coeff(0) : it->second;
+    if (a.second != t) return false;
+  }
+  for (const auto& t : terms)
+    if (acc.find(t.first) == acc.end()) return false;
+  return true;
+}
+
+std::vector<std::vector<coeff>>
+mvpolyT::gram_exact() const {
+  std::vector<std::vector<coeff>> Q(mb.size, std::vector<coeff>(mb.size, 0));
+  size_t k = 0;
+  for (unsigned int i = 0; i < mb.size; i++)
+    for (unsigned int j = i; j < mb.size; j++, k++)
+      Q[i][j] = Q[j][i] = solution.y_exact[k];
+  return Q;
+}
+
+/*
+ * Exact LDL^T without pivoting. Returns whether Q is PSD:
+ *   - every D[i] >= 0, and
+ *   - if D[i] == 0 the whole remaining column must be 0
+ *     (otherwise Q is not PSD).
+ */
+bool
+mvpolyT::LDLT_factor(const std::vector<std::vector<coeff>>& Q,
+                     std::vector<std::vector<coeff>>& L,
+                     std::vector<coeff>& D) const {
+  const size_t n = Q.size();
+  L.assign(n, std::vector<coeff>(n, 0));
+  D.assign(n, 0);
+  bool psd = true;
+
+  for (size_t i = 0; i < n; i++)
+    L[i][i] = 1;
+  for (size_t i = 0; i < n; i++) {
+    coeff sum = 0;
+    for (size_t j = 0; j < i; j++)
+      sum += L[i][j] * L[i][j] * D[j];
+    D[i] = Q[i][i] - sum;
+    if (D[i] < 0) psd = false;
+
+    for (size_t j = i + 1; j < n; j++) {
+      coeff sum2 = 0;
+      for (size_t k = 0; k < i; k++)
+        sum2 += L[j][k] * L[i][k] * D[k];
+      coeff r = Q[j][i] - sum2;
+
+      if (D[i] != 0) {
+        L[j][i] = r / D[i];
+        L[j][i].canonicalize();
+      }
+      else {
+        if (r != 0) psd = false;
+        L[j][i] = 0;
+      }
+    }
+  }
+  return psd;
+}
+
+bool
+mvpolyT::exactify(bool dorefine) {
+  if(!solution.solved)
+    throw std::runtime_error("It is necessary to solve first");
+
+  const unsigned int tol_digits = 100;
+  mpz_class maxden = 1000000;
+
+  if (dorefine) {
+    refine(512, tol_digits, 60);
+    if (solution.refined)
+      mpz_ui_pow_ui(maxden.get_mpz_t(), 10, tol_digits / 2);
+  }
+
+  continued_fractions(maxden);
+  projection();
+
+  if (!verify_identity()) {
+    if (verbose) std::cout << "[exactify] FAILED: f != z^T Q z\n";
+    return false;
+  }
+
+  std::vector<std::vector<coeff>> L;
+  std::vector<coeff> D;
+  bool psd = LDLT_factor(gram_exact(), L, D);
+  if (verbose)
+    std::cout << "[exactify] identity f = z^T Q z holds exactly; Q is "
+              << (psd ? "PSD  => exact certificate" : "NOT PSD  => no certificate") << '\n';
+  return psd;
 }
 
 /*
@@ -450,81 +733,37 @@ mvpolyT::exactify() {
  * Using the LDLT avoid square roots
  * and still in ℚ[X] 
  */
-void 
+bool
 mvpolyT::LDLT() {
   if(!solution.solved)
     throw std::runtime_error("It is necessary to solve first");
+  if(solution.y_exact.empty())
+    throw std::runtime_error("It is necessary to exactify first");
 
-  /*
-   * Gram matrix reconstruction
-   * from solution
-   */
-  std::vector<std::vector<coeff>> Q( mb.size , std::vector<coeff>(mb.size, 0));
-  unsigned k=0;
-  for (unsigned int i = 0; i<mb.size ; i++){
-    for (unsigned int j = i; j<mb.size; j++){
-      // coeff q = solution.y[k];
-      coeff q = solution.y_exact[k];
-      // coeff q(solution.y[k]);
-      q.canonicalize();
-      Q[i][j] = q;
-      Q[j][i] = q;
-      k++;
-    }
-  }
-    // dbg
-    std::cout<<"Q =";
-    for(unsigned int i = 0;i<mb.size; i++) {
-      for(unsigned j = 0; j<mb.size; j++) {
-	std::cout<<"\t"<<Q[i][j];
-      }
-      std::cout<<'\n';
-    }
-  /*
-   * LDLT
-   */
-  std::vector<std::vector<coeff>> L(mb.size, std::vector<coeff>(mb.size, 0));
-  std::vector<coeff> D(mb.size, 0);
+  std::vector<std::vector<coeff>> Q = gram_exact();
+  std::vector<std::vector<coeff>> L;
+  std::vector<coeff> D;
+  const bool psd = LDLT_factor(Q, L, D);
 
-  for (unsigned int i = 0; i<mb.size; i++)
-    L[i][i]=1;
-  for (unsigned int i = 0; i<mb.size; i++) {
-    coeff sum = 0;
-    for (unsigned int j=0; j<i; j++)
-      sum += L[i][j]*L[i][j]*D[j];
-    D[i] = Q[i][i] - sum;
-    
-    for (unsigned int j=i+1;j<mb.size;j++){
-      coeff sum2 = 0;
-      for(unsigned int k = 0; k<i; k++)
-	sum2 += L[j][k] * L[i][k] * D[k];
-
-      if (D[i] != 0) {
-	    L[j][i] = (Q[j][i] - sum2) / D[i];
-        L[j][i].canonicalize();
-      }
-      else {
-       L[j][i]=0;
-      }
-    }
-  }
-  
-  // TODO modularize
   // dbg
-  
+  std::cout<<"Q =";
+  for(unsigned int i = 0;i<mb.size; i++) {
+    for(unsigned j = 0; j<mb.size; j++)
+      std::cout<<"\t"<<Q[i][j];
+    std::cout<<'\n';
+  }
+
   std::cout<<"L=";
   for(unsigned int i = 0; i< mb.size;i++) {
-    for(unsigned int j = 0; j< mb.size; j++) {
+    for(unsigned int j = 0; j< mb.size; j++)
       std::cout<<"\t"<<L[i][j];
-    }
     std::cout<<"\n";
   }
   std::cout<<"\n";
 
   std::cout<<"D=";
-  for(unsigned int i=0;i<mb.size;i++) {
+  for(unsigned int i=0;i<mb.size;i++)
     std::cout<<"\t"<<D[i];
-  }
   std::cout<<"\n";
 
   /*
@@ -536,7 +775,7 @@ mvpolyT::LDLT() {
   bool first = true;
   for (unsigned int i = 0; i < mb.size; i++) {
     double d_val = D[i].get_d();
-    if (std::abs(d_val) <= 1e-10)
+    if (D[i] == 0)
       continue;
 
     if (!first)
@@ -576,20 +815,19 @@ mvpolyT::LDLT() {
           continue;
         
         std::cout << "x_" << (v + 1);
-        if (mb.monomials[j][v] != 1) {
+        if (mb.monomials[j][v] != 1)
           std::cout << "^" << mb.monomials[j][v];
-        }
         std::cout << " ";
         vars = true;
       }
-      if (!vars && (l_val == 1.0 || l_val == -1.0)) {
+      if (!vars && (l_val == 1.0 || l_val == -1.0))
         std::cout << "1";
-      }
     }
     std::cout << ")^2";
   }
   std::cout << "\n";
-
+  std::cout << (psd ? "Q is PSD (all D_i >= 0)\n" : "Q is NOT PSD\n");
+  return psd;
 }
 
 /*

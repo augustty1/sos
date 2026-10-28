@@ -1,0 +1,89 @@
+
+---
+events:
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/share/cmake-4.2/Modules/CMakeDetermineSystem.cmake:12 (find_program)"
+      - "CMakeLists.txt:16 (project)"
+    mode: "program"
+    variable: "CMAKE_UNAME"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "uname"
+    candidate_directories:
+      - "/home/augusto/.opam/default/bin/"
+      - "/home/augusto/.local/bin/"
+      - "/home/augusto/.local/share/gem/ruby/3.4.0/bin/"
+      - "/home/augusto/.rbenv/shims/"
+      - "/home/augusto/.rbenv/bin/"
+      - "/home/augusto/.cargo/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/lib/jvm/default-jdk/bin/"
+      - "/usr/lib/jvm/default-jre/bin/"
+      - "/usr/local/smlnj/bin/"
+      - "/usr/local/dotnet/"
+      - "/usr/local/dotnet/tools/"
+      - "/usr/local/dafny/"
+      - "/home/augusto/.rvm/bin/"
+    searched_directories:
+      - "/home/augusto/.opam/default/bin/uname"
+      - "/home/augusto/.local/bin/uname"
+      - "/home/augusto/.local/share/gem/ruby/3.4.0/bin/uname"
+      - "/home/augusto/.rbenv/shims/uname"
+      - "/home/augusto/.rbenv/bin/uname"
+      - "/home/augusto/.cargo/bin/uname"
+      - "/usr/local/sbin/uname"
+      - "/usr/local/bin/uname"
+    found: "/usr/bin/uname"
+    search_context:
+      ENV{PATH}:
+        - "/home/augusto/.opam/default/bin"
+        - "/home/augusto/.local/bin"
+        - "/home/augusto/.local/share/gem/ruby/3.4.0/bin"
+        - "/home/augusto/.rbenv/shims"
+        - "/home/augusto/.rbenv/bin"
+        - "/home/augusto/.local/bin"
+        - "/home/augusto/.local/share/gem/ruby/3.4.0/bin"
+        - "/home/augusto/.rbenv/shims"
+        - "/home/augusto/.rbenv/bin"
+        - "/home/augusto/.cargo/bin"
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/bin"
+        - "/usr/sbin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/lib/jvm/default-jdk/bin"
+        - "/usr/lib/jvm/default-jre/bin"
+        - "/usr/local/smlnj/bin"
+        - "/usr/local/dotnet/"
+        - "/usr/local/dotnet//tools"
+        - "/usr/local/dafny"
+        - "/home/augusto/.rvm/bin"
+        - "/usr/local/smlnj/bin"
+        - "/usr/local/dotnet/"
+        - "/usr/local/dotnet//tools"
+        - "/usr/local/dafny"
+        - "/home/augusto/.rvm/bin"
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/share/cmake-4.2/Modules/CMakeDetermineSystem.cmake:212 (message)"
+      - "CMakeLists.txt:16 (project)"
+    message: |
+      The system is: Linux - 6.18.38_1 - x86_64
+...

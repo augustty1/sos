@@ -1,5 +1,7 @@
 /*
- *	Converts an multivariate polynomial sparse point value representation to the sparse sdpa format
+ *	Reads a multivariate polynomial (sparse representation) from stdin,
+ *	solves the Gram-matrix SDP with SCIP-SDP, refines + exactifies the
+ *	solution and verifies the exact SOS certificate.
  */
 #include <exception>
 #include <iostream>
@@ -24,14 +26,23 @@ int main () {
    */
   F.solvesdp();
 
-
-  // TODO projection in affine subspace
-  F.exactify();
+  /*
+   * refine (Gauss-Newton) + continued fractions + projection
+   * + exact verification (f == z^T Q z and Q PSD)
+   */
+  bool certified = F.exactify();
 
   F.LDLT();
 
   // just for debuging
   F.mbdbg();
+
+  if (!certified) {
+    std::cerr << "NOT certified: f is not strictly inside the SOS cone "
+                 "(or the SDP solution is too inaccurate).\n";
+    return 2;
+  }
+  std::cout << "CERTIFIED: exact SOS decomposition in Q.\n";
   }
   catch (const std::exception& e){
     std::cerr << "Error: "<<e.what()<<'\n';

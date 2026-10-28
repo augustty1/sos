@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/sos.dir/link.d CMakeFiles/sos.dir/src/main.cpp.o CMakeFiles/sos.dir/src/mvpolynomial.cpp.o -o sos  libScipPP.a /usr/lib/libscipsdp.so /usr/lib64/libscip.so.10.0.2 /usr/lib/libgmpxx.so /usr/lib/libgmp.so /usr/lib/libmpfr.so

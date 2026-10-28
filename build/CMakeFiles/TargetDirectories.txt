@@ -1,0 +1,4 @@
+/home/augusto/desktop/research/project/sos/build/CMakeFiles/ScipPP.dir
+/home/augusto/desktop/research/project/sos/build/CMakeFiles/sos.dir
+/home/augusto/desktop/research/project/sos/build/CMakeFiles/edit_cache.dir
+/home/augusto/desktop/research/project/sos/build/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,3 @@
+/home/augusto/desktop/research/project/sos/build/_deps/scippp_src-subbuild/CMakeFiles/scippp_src-populate.dir
+/home/augusto/desktop/research/project/sos/build/_deps/scippp_src-subbuild/CMakeFiles/edit_cache.dir
+/home/augusto/desktop/research/project/sos/build/_deps/scippp_src-subbuild/CMakeFiles/rebuild_cache.dir

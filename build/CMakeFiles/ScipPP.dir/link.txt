@@ -1,0 +1,2 @@
+/usr/bin/ar qc libScipPP.a "CMakeFiles/ScipPP.dir/_deps/scippp_src-src/source/initial_solution.cpp.o" "CMakeFiles/ScipPP.dir/_deps/scippp_src-src/source/lin_expr.cpp.o" "CMakeFiles/ScipPP.dir/_deps/scippp_src-src/source/lin_ineq.cpp.o" "CMakeFiles/ScipPP.dir/_deps/scippp_src-src/source/model.cpp.o" "CMakeFiles/ScipPP.dir/_deps/scippp_src-src/source/var.cpp.o" CMakeFiles/ScipPP.dir/scippp_version.cpp.o
+/usr/bin/ranlib libScipPP.a
